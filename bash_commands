@@ -1,0 +1,9 @@
+# install
+pip install ultralytics
+
+# check
+yolo
+
+#unzip data
+cd /Users/jameselsner/Desktop/Projects/ddc-vision
+unzip ddc-discs.v1-roboflow-instant-1--eval-.yolov8.zip -d ddc-discs

@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+/Pictures
+/Videos
+/frames_output
+/ddc-discs
+
+
+# Ignore videos
+*.mp4

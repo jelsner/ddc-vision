@@ -1,0 +1,20 @@
+# Install Miniforge (if not already)
+# https://github.com/conda-forge/miniforge
+
+# Create a new environment
+source ~/miniforge3/bin/activate
+conda create -n ddc-ai python=3.11
+conda activate ddc-ai
+
+# OpenCV
+conda install -c conda-forge opencv
+
+# PyTorch for Apple Silicon
+conda install pytorch torchvision torchaudio -c pytorch-nightly
+
+# TensorFlow (macOS Metal-accelerated)
+pip install tensorflow-macos
+pip install tensorflow-metal
+
+
+
