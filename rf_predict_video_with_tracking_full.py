@@ -6,6 +6,7 @@ import base64
 import requests
 import numpy as np
 
+
 # ========= CONFIG: set these =========
 API_KEY   = "wNNtaVXlX79MsMdYXtEc"             # Roboflow > Settings > API Keys
 MODEL_ID  = "ddc-discs-5vdna/2"             # From Deploy tab, e.g. "<project_slug>/<version>"
