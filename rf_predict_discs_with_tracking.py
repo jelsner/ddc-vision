@@ -5,11 +5,11 @@ from collections import deque
 # ====== CONFIG ======
 API_KEY   = "wNNtaVXlX79MsMdYXtEc"
 MODEL_ID  = "ddc-discs-5vdna/7"    # RF-DETR v7
-VIDEO_IN  = "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/Augie_Highlight_Volley.mp4"
-VIDEO_OUT = "predicted_tracked.mp4"
+VIDEO_IN  = "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/Jim_Vergil.mov"
+VIDEO_OUT = "predicted_tracked3.mp4"
 CSV_OUT   = "tracks.csv"
 
-CONFIDENCE   = 0.23
+CONFIDENCE   = 0.21
 FRAME_STRIDE = 1
 RESIZE_WIDTH = 1536
 TOP_K        = 2

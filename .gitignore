@@ -10,3 +10,6 @@
 
 # Ignore videos
 *.mp4
+
+# Ignore tracks
+*.csv
