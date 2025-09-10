@@ -1,6 +1,6 @@
 from roboflow import Roboflow
 
-rf = Roboflow(api_key="71SjhPOPiAGvQLxirrwi")
+rf = Roboflow(api_key="XXXX")
 project = rf.workspace().project("escape-frisbee-game-3xwgq")
 model = project.version("1").model
 
