@@ -8,11 +8,11 @@ import numpy as np
 from collections import deque
 
 # ====== CONFIG ======
-API_KEY   = "XXXX"
-MODEL_ID  = "ddc-discs-5vdna/8"    # RF-DETR v8
+API_KEY   = "71SjhPOPiAGvQLxirrwi"
+MODEL_ID  = "escape-frisbee-game-3xwgq/1"
 VIDEO_IN  = "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/Jim_Vergil.mov"  # full path
-VIDEO_OUT = "predicted_tracked6.mp4"
-CSV_OUT   = "tracks6.csv"
+VIDEO_OUT = "predicted_tracked7.mp4"
+CSV_OUT   = "tracks7.csv"
 
 CONFIDENCE   = 0.21
 FRAME_STRIDE = 1
