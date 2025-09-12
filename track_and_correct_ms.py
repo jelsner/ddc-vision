@@ -1,9 +1,10 @@
-# track_and_correct_ms.py
+# track_and_correct.py
 import math
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 import numpy as np
 import pandas as pd
 import cv2
+
 
 # ====== HARD-CODED IO ======
 IN_CSV  = "Videos/Annotated/predictions_rally2.csv"   # from your RF video export
@@ -17,12 +18,18 @@ H_TXT   = "H.txt"   # produced by click_court_corners_6.py
 # ------------------------
 IOU_THRESH         = 0.20
 MAX_DIST_PX        = 160
-MAX_FRAME_GAP      = 2
+MAX_FRAME_GAP      = 3
 MIN_CONF           = 0.15
 MIN_W, MIN_H       = 6, 6
 
-VEL_MAX_MS         = 40.0  # cap too-high speeds in m/s
+VEL_MAX_MS         = 35  # cap too-high speeds in m/s
 VEL_MIN_FRAMES     = 3
+
+# speed smoothing
+SPEED_EMA_ALPHA    = 0.35  # 0..1 (higher = snappier)
+ACC_MAX_UP         = 18.0  # m/s^2 max increase (release spike)
+ACC_MAX_DOWN       = 60.0  # m/s^2 max decrease (can slow quicker)
+SPEED_MEDIAN_WIN   = 5     # rolling median window (odd >=1); set to 1 to disable
 
 COLOR_FLIP_MARGIN  = 0.15
 EMA_ALPHA          = 0.30
@@ -75,6 +82,8 @@ class Track:
         self.family = "disc" if is_disc(row["class"]) else ("player" if is_player(row["class"]) else "other")
         self.color_locked = False
         self.locked_color = None
+        self.last_speed = 0.0
+        self.speed_hist = deque(maxlen=max(1, SPEED_MEDIAN_WIN))
         if self.family == "disc" and row["class"] in {"disc_red", "disc_yellow"}:
             self.color_locked = True
             self.locked_color = row["class"]
@@ -107,7 +116,7 @@ class Track:
         vel_ok = (len(self.rows) < VEL_MIN_FRAMES) or (v_ms <= VEL_MAX_MS)
         score = iou - 0.0005 * dist_px
         return (True, score, vel_ok)
-
+      
     def add(self, row):
         lbl = row["class"]; conf = float(row["confidence"])
 
@@ -123,10 +132,39 @@ class Track:
 
         dt_frames = max(1, int(row["frame"]) - self.last_frame)
         dt = dt_frames / FPS
-        dist_m = math.hypot(row["X_m"] - self.last_xy_m[0], row["Y_m"] - self.last_xy_m[1])
-        v_ms = dist_m / max(dt, 1e-9) if len(self.rows) >= 1 else 0.0
-        row["speed_ms"] = float(v_ms)
 
+        # --- speed in m/s using meters positions ---
+        dist_m = math.hypot(row["X_m"] - self.last_xy_m[0], row["Y_m"] - self.last_xy_m[1])
+        v_inst = dist_m / max(dt, 1e-9) if len(self.rows) >= 1 else 0.0
+
+        # discs get smoothing + acc clamp + median + hard cap
+        if self.family == "disc":
+            # EMA toward instantaneous
+            v_ema = SPEED_EMA_ALPHA * v_inst + (1.0 - SPEED_EMA_ALPHA) * self.last_speed
+
+            # acceleration clamp (vs last_speed)
+            dv = v_ema - self.last_speed
+            max_up   = ACC_MAX_UP * dt
+            max_down = ACC_MAX_DOWN * dt
+            if dv >  max_up:   v_filt = self.last_speed + max_up
+            elif dv < -max_down: v_filt = self.last_speed - max_down
+            else:               v_filt = v_ema
+
+            # optional short median
+            self.speed_hist.append(v_filt)
+            v_med = (sorted(self.speed_hist)[len(self.speed_hist)//2]
+                     if SPEED_MEDIAN_WIN > 1 else v_filt)
+
+            # hard cap
+            v_final = max(0.0, min(VEL_MAX_MS, v_med))
+
+            row["speed_ms"] = float(v_final)
+            self.last_speed = v_final
+        else:
+            # players/other (unchanged)
+            row["speed_ms"] = float(v_inst)
+
+        # ---- update spatial + bookkeeping ----
         self.rows.append(row)
         self.last_frame = int(row["frame"])
         self.last_xy_px = (float(row["x"]), float(row["y"]))

@@ -7,7 +7,7 @@ from datetime import datetime
 
 # === CONFIG ===
 VIDEO_IN       = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4"
-FRAME_IDX      = 100        # which frame to show
+FRAME_IDX      = 604        # which frame to show
 OUT_TXT        = "court_points.txt"
 OUT_JSON       = "calibration_6pts.json"
 OUT_H_TXT      = "H.txt"

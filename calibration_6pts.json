@@ -1,31 +1,31 @@
 {
-  "video_in": "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/Annotated/annotated_rally2_tracked.mp4",
-  "frame_idx": 100,
-  "timestamp": "2025-09-11T17:31:14.760556",
+  "video_in": "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4",
+  "frame_idx": 604,
+  "timestamp": "2025-09-12T12:34:54.951716",
   "pixel_points": [
     [
-      742.5,
+      739.5,
+      789.0
+    ],
+    [
+      1380.0,
       787.5
     ],
     [
-      1378.5,
-      786.0
-    ],
-    [
       1470.0,
-      819.0
+      817.5
     ],
     [
-      613.5,
-      808.5
+      598.5,
+      816.0
     ],
     [
       139.5,
-      895.5
+      897.0
     ],
     [
       1776.0,
-      900.0
+      903.0
     ]
   ],
   "world_points": [

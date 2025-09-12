@@ -1,4 +1,4 @@
-# render_from_csv_tracked_ms.py
+# render_from_csv_tracked.py
 import os
 import csv
 import cv2
@@ -15,7 +15,7 @@ VIDEO_OUT  = "Videos/Annotated/annotated_rally2_tracked_ms.mp4"
 H_PATH     = "H.txt"
 
 # Optional: export an enhanced CSV with speed & metric coords
-WRITE_CSV_OUT = True
+WRITE_CSV_OUT = False
 CSV_OUT       = "Videos/Annotated/track_corrected_rally2_with_ms.csv"
 
 MIN_CONF   = 0.00  # keep everything already exported; raise if needed
@@ -28,9 +28,18 @@ FONT_SCALE = 1.4   # tuned for 4K; try 1.2–2.0
 THICK      = 4
 PAD_Y      = 12
 
-# Speed smoothing / sanity
-EMA_ALPHA     = 0.75          # 0..1 (higher = snappier)
-SPEED_MAX_MPS = 50.0          # clamp outliers
+# ---- 2D speed fallback (not used now, kept for reference) ----
+SPEED_MAX_MPS = 50.0          # clamp scalar speed if needed
+
+# --- 3D speed / height-proxy config (tune as needed) ---
+ZPX_REF   = 40.0   # px: typical disc bbox size when it's ~Z_REF_M away (rough heuristic)
+Z_REF_M   = 20.0   # m : distance corresponding to ZPX_REF (tune per lens/angle)
+Z_MIN_M   = 0.0    # clamp
+Z_MAX_M   = 12.0   # plausible apex height in meters (tune to your footage)
+
+EMA_ALPHA_V   = 0.08   # EMA for speed readout (0..1; higher = snappier)
+EMA_ALPHA_Z   = 0.20   # EMA for Z proxy (smoother height)
+MAX_ACC_MPS2  = 80.0   # acceleration clamp for *velocity change* (try 50–120)
 # =============
 
 # BGR colors
@@ -118,12 +127,38 @@ def px_to_meters(cx_px, cy_px, H):
     Y = float(w[1] / w[2])
     return X, Y
 
+def disc_height_proxy_m(box_w_px: float, box_h_px: float) -> float:
+    """
+    Quick-and-dirty Z proxy from apparent size: inverse proportional to the larger bbox edge.
+    Z ≈ Z_REF_M * (ZPX_REF / max(major_px, 1)).
+    Then clamped to [Z_MIN_M, Z_MAX_M].
+    """
+    bb = max(float(box_w_px), float(box_h_px), 1.0)
+    z = Z_REF_M * (ZPX_REF / bb)
+    return float(np.clip(z, Z_MIN_M, Z_MAX_M))
+
+def clamp_velocity_change(v_raw: np.ndarray, v_prev: np.ndarray, dt: float) -> np.ndarray:
+    """
+    Limit how fast velocity can change (|Δv| <= MAX_ACC_MPS2 * dt).
+    If no prev velocity, return v_raw unchanged.
+    """
+    if v_prev is None:
+        return v_raw
+    dv = v_raw - v_prev
+    dv_mag = float(np.linalg.norm(dv))
+    if dv_mag <= 1e-9:
+        return v_raw
+    dv_max = MAX_ACC_MPS2 * max(dt, 1e-3)
+    if dv_mag <= dv_max:
+        return v_raw
+    return v_prev + dv * (dv_max / dv_mag)
+
 def main():
     assert os.path.exists(VIDEO_IN), f"Video not found: {VIDEO_IN}"
     assert os.path.exists(CSV_IN),   f"CSV not found: {CSV_IN}"
     assert os.path.exists(H_PATH),   f"Homography not found: {H_PATH}"
 
-    H = np.loadtxt(H_PATH)
+    Hm = np.loadtxt(H_PATH)
     preds = load_by_frame(CSV_IN)
 
     cap = cv2.VideoCapture(VIDEO_IN)
@@ -143,15 +178,14 @@ def main():
         with open(CSV_IN, "r", newline="") as f_in:
             r_in = csv.DictReader(f_in)
             base_fields = r_in.fieldnames or []
-        # ensure expected base fields
-        add_fields = ["track_speed_ms", "center_X_m", "center_Y_m"]
+        add_fields = ["track_speed_ms", "center_X_m", "center_Y_m", "center_Z_proxy_m"]
         out_fields = base_fields + [f for f in add_fields if f not in base_fields]
         csv_out_writer = csv.DictWriter(open(CSV_OUT, "w", newline=""), fieldnames=out_fields)
         csv_out_writer.writeheader()
 
     # trail state: track_id -> deque[(x,y), ...]
     trails = {}
-    # kinematic state: tid -> {last_XY_m, last_t, ema_v}
+    # kinematic state: tid -> {last_XYZ_m, last_t, ema_v, v_prev, ema_z}
     kin = {}
 
     f = 0
@@ -162,35 +196,60 @@ def main():
             break
 
         dets = preds.get(f, [])
-        # If time_s not provided, compute from frame/FPS
-        # (We’ll still pass through provided times if present.)
-        default_t = f / FPS
+        default_t = f / FPS  # used if no time_s
 
-        # draw dets
         for d in dets:
             x1, y1, x2, y2 = to_xyxy(d["x"], d["y"], d["w"], d["h"])
             cx = (x1 + x2) // 2; cy = (y1 + y2) // 2
             t_now = d["time_s"] if d["time_s"] is not None else default_t
 
             # metric center via homography
-            X_m, Y_m = px_to_meters(cx, cy, H)
+            X_m, Y_m = px_to_meters(cx, cy, Hm)
 
-            # speed (EMA, clamped) for tracked objects only
+            # 3D speed with Z-proxy (disc only), EMA + acceleration clamp
             spd = None
             tid = int(d.get("track_id", -1))
+            is_disc = ("disc" in (d["cls"] or "").lower())
+
+            Z_m_proxy = None
             if tid != -1 and X_m is not None and Y_m is not None:
+                # Z proxy from bbox size (players -> 0 height)
+                z_proxy = disc_height_proxy_m(d["w"], d["h"]) if is_disc else 0.0
                 prev = kin.get(tid)
+
                 if prev is None:
-                    kin[tid] = {"last_XY_m": (X_m, Y_m), "last_t": t_now, "ema_v": 0.0}
+                    kin[tid] = {
+                        "last_XYZ_m": np.array([X_m, Y_m, z_proxy], dtype=np.float64),
+                        "last_t": float(t_now),
+                        "ema_v": 0.0,
+                        "v_prev": None,
+                        "ema_z": float(z_proxy),
+                    }
                     spd = 0.0
+                    Z_m_proxy = float(z_proxy)
                 else:
-                    dt = max(1e-3, (t_now - prev["last_t"]))  # seconds
-                    dist = float(np.hypot(X_m - prev["last_XY_m"][0], Y_m - prev["last_XY_m"][1]))
-                    v = dist / dt
-                    # EMA + clamp
-                    ema_v = EMA_ALPHA * v + (1.0 - EMA_ALPHA) * prev["ema_v"]
+                    # smooth Z
+                    prev["ema_z"] = float(EMA_ALPHA_Z * z_proxy + (1.0 - EMA_ALPHA_Z) * prev["ema_z"])
+                    Z_m = prev["ema_z"] if is_disc else 0.0
+                    Z_m_proxy = float(Z_m)
+
+                    # current 3D position and velocity
+                    p_now = np.array([X_m, Y_m, Z_m], dtype=np.float64)
+                    dt = max(1e-3, float(t_now - prev["last_t"]))  # seconds
+
+                    v_raw = (p_now - prev["last_XYZ_m"]) / dt
+                    v_clamped = clamp_velocity_change(v_raw, prev.get("v_prev"), dt)
+
+                    v_mag = float(np.linalg.norm(v_clamped))
+                    ema_v = EMA_ALPHA_V * v_mag + (1.0 - EMA_ALPHA_V) * prev["ema_v"]
                     ema_v = float(np.clip(ema_v, 0.0, SPEED_MAX_MPS))
-                    prev.update({"last_XY_m": (X_m, Y_m), "last_t": t_now, "ema_v": ema_v})
+
+                    # update state
+                    prev["last_XYZ_m"] = p_now
+                    prev["last_t"]     = float(t_now)
+                    prev["v_prev"]     = v_clamped
+                    prev["ema_v"]      = ema_v
+
                     spd = ema_v
 
             # draw box + label
@@ -217,9 +276,6 @@ def main():
 
             # write enhanced CSV row if requested
             if csv_out_writer is not None:
-                # Reconstruct a row compatible with input + added fields
-                # We’ll reopen the CSV for reading raw row values? Easier: write from parsed d and fill what we know.
-                # Populate minimally required fields; unknown original fields remain best-effort.
                 out_row = {
                     "frame": f,
                     "time_s": t_now,
@@ -230,12 +286,11 @@ def main():
                     "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                     "track_id": tid if tid != -1 else ""
                 }
-                # add the new fields
                 out_row["track_speed_ms"] = (None if spd is None else float(spd))
                 out_row["center_X_m"] = (None if X_m is None else float(X_m))
                 out_row["center_Y_m"] = (None if Y_m is None else float(Y_m))
+                out_row["center_Z_proxy_m"] = (None if Z_m_proxy is None else float(Z_m_proxy))
 
-                # Make sure all expected output columns exist
                 for k in csv_out_writer.fieldnames:
                     if k not in out_row:
                         out_row[k] = ""
