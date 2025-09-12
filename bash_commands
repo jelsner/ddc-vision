@@ -7,3 +7,6 @@ yolo
 #unzip data
 cd /Users/jameselsner/Desktop/Projects/ddc-vision
 unzip ddc-discs.v1-roboflow-instant-1--eval-.yolov8.zip -d ddc-discs
+
+# get frames per second
+ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of default=noprint_wrappers=1:nokey=1 Videos/Annotated/annotated_rally3_tracked.mp4

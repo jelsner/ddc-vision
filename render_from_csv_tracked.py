@@ -7,9 +7,9 @@ import numpy as np
 from collections import defaultdict, deque
 
 # === CONFIG ===
-VIDEO_IN   = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally3.mp4"
-CSV_IN     = "Videos/Annotated/track_corrected_rally3.csv"   # frame-wise detections
-VIDEO_OUT  = "Videos/Annotated/annotated_rally3_tracked_ms.mp4"
+VIDEO_IN   = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4"
+CSV_IN     = "Videos/Annotated/track_corrected_rally2.csv"   # frame-wise detections
+VIDEO_OUT  = "Videos/Annotated/annotated_rally2_tracked_ms.mp4"
 
 # Homography (pixel -> meters) saved by your click tool (np.savetxt)
 H_PATH     = "H.txt"

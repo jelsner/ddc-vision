@@ -8,7 +8,7 @@ import cv2
 # ====== HARD-CODED IO ======
 IN_CSV  = "Videos/Annotated/predictions_rally2.csv"   # from your RF video export
 OUT_CSV = "Videos/Annotated/track_corrected_rally2.csv"
-FPS     = 30.0
+FPS     = 29.97
 H_TXT   = "H.txt"   # produced by click_court_corners_6.py
 # ===========================
 

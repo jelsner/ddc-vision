@@ -2,15 +2,15 @@ import os, csv, json, urllib.request
 from roboflow import Roboflow
 
 # ===== CONFIG =====
-API_KEY   = "DDDDD"
+API_KEY   = "XXXX"
 PROJECT   = "escape-frisbee-game-3xwgq"
 VERSION   = "1"
-VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally3.mp4"
-FPS       = 29
+VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4"
+FPS       = 29.97
 PRED_TYPE = "batch-video"
 
 #JSON_OUT  = "Videos/Annotated/results_rally2.json"
-CSV_OUT   = "Videos/Annotated/predictions_rally3.csv"
+CSV_OUT   = "Videos/Annotated/predictions_rally2.csv"
 #ANNO_OUT  = "annotated2.mp4"    # if a signed/visualization URL is present
 # ==================
 
