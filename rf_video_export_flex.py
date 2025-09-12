@@ -2,15 +2,15 @@ import os, csv, json, urllib.request
 from roboflow import Roboflow
 
 # ===== CONFIG =====
-API_KEY   = "XXXX"
+API_KEY   = "DDDDD"
 PROJECT   = "escape-frisbee-game-3xwgq"
 VERSION   = "1"
-VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4"
+VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally3.mp4"
 FPS       = 29
 PRED_TYPE = "batch-video"
 
-JSON_OUT  = "Videos/Annotated/results_rally2.json"
-CSV_OUT   = "Videos/Annotated/predictions_rally2.csv"
+#JSON_OUT  = "Videos/Annotated/results_rally2.json"
+CSV_OUT   = "Videos/Annotated/predictions_rally3.csv"
 #ANNO_OUT  = "annotated2.mp4"    # if a signed/visualization URL is present
 # ==================
 
@@ -35,9 +35,9 @@ def main():
     results = model.poll_until_video_results(job_id)
 
     # Save raw JSON so we can always inspect
-    with open(JSON_OUT, "w") as jf:
-        json.dump(results, jf)
-    print(f"📝 Saved raw JSON → {JSON_OUT}")
+    #with open(JSON_OUT, "w") as jf:
+    #    json.dump(results, jf)
+    #print(f"📝 Saved raw JSON → {JSON_OUT}")
 
     # Try to download annotated video if link is present
     #video_url = results.get("video") or results.get("visualization") or signed_url

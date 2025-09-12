@@ -4,9 +4,9 @@ import cv2
 import re
 
 # === CONFIG ===
-VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4"
-CSV_IN    = "Videos/Annotated/predictions_rally2.csv"    # from rf_video_export_flex.py
-VIDEO_OUT = "Videos/Annotated/annotated_rally2.mp4"
+VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally1.mov"
+CSV_IN    = "Videos/Annotated/track_corrected_rally1.csv"    # from rf_video_export_flex.py
+VIDEO_OUT = "Videos/Annotated/annotated_rally1c.mp4"
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 FONT_SCALE = 1.8     # tuned for 4K; try 1.2–2.2 as needed

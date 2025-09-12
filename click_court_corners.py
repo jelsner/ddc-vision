@@ -2,8 +2,8 @@ import cv2
 import os
 
 # === CONFIG ===
-VIDEO_IN = "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/Jim_Vergil.mov"
-FRAME_IDX = 200  # which frame to show
+VIDEO_IN = "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/Annotated/annotated_rally2_tracked.mp4"
+FRAME_IDX = 100  # which frame to show
 OUT_TXT   = "court_points.txt"
 DISPLAY_WIDTH = 1280   # 960 max width for display window (scaled down)
 # ==============
