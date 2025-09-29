@@ -1,4 +1,4 @@
-# ddc_predict_discs_with_tracking_trails_vclass.py
+# predict_discs_with_tracking.py
 import os
 import cv2
 import csv
@@ -8,8 +8,8 @@ import numpy as np
 from collections import deque
 
 # ====== CONFIG ======
-API_KEY   = "71SjhPOPiAGvQLxirrwi"
-MODEL_ID  = "escape-frisbee-game-3xwgq/1"
+API_KEY   = "XXXX"
+MODEL_ID  = "ddc_game1_objectdetection-iqa0h/2"
 VIDEO_IN  = "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/Jim_Vergil.mov"  # full path
 VIDEO_OUT = "predicted_tracked7.mp4"
 CSV_OUT   = "tracks7.csv"

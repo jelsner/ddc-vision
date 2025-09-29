@@ -1,21 +1,21 @@
+# rf_video_export_flex.py
 import os, csv, json, urllib.request
 from roboflow import Roboflow
 
 # ===== CONFIG =====
-API_KEY   = "XXXX"
-PROJECT   = "escape-frisbee-game-3xwgq"
-VERSION   = "1"
-VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4"
+API_KEY   = "XXXX"   # Roboflow > Settings > API Keys
+PROJECT   = "ddc_game1_objectdetection-iqa0h"
+VERSION   = "2"
+VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Games/13Sep2025/G2_V1.mov"
 FPS       = 29.97
 PRED_TYPE = "batch-video"
 
-#JSON_OUT  = "Videos/Annotated/results_rally2.json"
-CSV_OUT   = "Videos/Annotated/predictions_rally2.csv"
-#ANNO_OUT  = "annotated2.mp4"    # if a signed/visualization URL is present
+JSON_OUT  = "Videos/Annotated/results_G2_V1.json"
+CSV_OUT   = "Videos/Annotated/predictions_G2_V1.csv"
+ANNO_OUT  = "Videos/Annotated/annotated_G2_V1.mp4"  # if a visualization URL is present
 # ==================
 
 def to_xyxy(x, y, w, h):
-    # center (x,y,w,h) -> corners (x1,y1,x2,y2)
     x1 = x - w/2.0
     y1 = y - h/2.0
     x2 = x + w/2.0
@@ -29,45 +29,40 @@ def main():
     project = rf.workspace().project(PROJECT)
     model = project.version(str(VERSION)).model
 
+    # Kick off batch prediction
     job_id, signed_url, expire_time = model.predict_video(
         VIDEO_IN, fps=FPS, prediction_type=PRED_TYPE
     )
     results = model.poll_until_video_results(job_id)
 
-    # Save raw JSON so we can always inspect
-    #with open(JSON_OUT, "w") as jf:
-    #    json.dump(results, jf)
-    #print(f"📝 Saved raw JSON → {JSON_OUT}")
+    # Always save raw JSON (handy for debugging / re-parsing)
+    with open(JSON_OUT, "w") as jf:
+        json.dump(results, jf)
+    print(f"📝 Saved raw JSON → {JSON_OUT}")
 
     # Try to download annotated video if link is present
-    #video_url = results.get("video") or results.get("visualization") or signed_url
-    #if video_url:
-    #    try:
-    #        print(f"⬇️  Downloading annotated video → {ANNO_OUT}")
-    #        urllib.request.urlretrieve(video_url, ANNO_OUT)
-    #        print("✅ Annotated video saved.")
-    #    except Exception as e:
-    #        print(f"⚠️ Could not download annotated video: {e}")
+    video_url = results.get("video") or results.get("visualization") or signed_url
+    if video_url:
+        try:
+            os.makedirs(os.path.dirname(ANNO_OUT), exist_ok=True)
+            print(f"⬇️  Downloading annotated video → {ANNO_OUT}")
+            urllib.request.urlretrieve(video_url, ANNO_OUT)
+            print("✅ Annotated video saved.")
+        except Exception as e:
+            print(f"⚠️ Could not download annotated video: {e}")
 
     # --- Parse predictions robustly across variants ---
+    rows = []
 
-    rows = []  # we'll accumulate CSV rows here
-
-    # Variant A (your case): results has arrays and a key == project slug
-    # {
-    #   "frame_offset":[...], "time_offset":[...],
-    #   "escape-frisbee-game-3xwgq":[ { "image":..., "predictions":[...] }, ... ]
-    # }
+    # Variant A: { "frame_offset":[...], "time_offset":[...], "<project>":[ {image:{}, predictions:[...]}, ...] }
     if PROJECT in results and isinstance(results[PROJECT], list):
         frames = results[PROJECT]
         frame_offsets = results.get("frame_offset", [])
         time_offsets  = results.get("time_offset", [])
         for i, fobj in enumerate(frames):
             preds = fobj.get("predictions", []) or []
-            # map to offsets if available; otherwise use i
             frame_idx = frame_offsets[i] if i < len(frame_offsets) else i
             t_sec     = time_offsets[i]  if i < len(time_offsets)  else None
-
             for det in preds:
                 cls_name = det.get("class") or det.get("label")
                 cls_id   = det.get("class_id")
@@ -108,9 +103,10 @@ def main():
                 rows.append([frame_idx, t_sec, cls_name, cls_id, x, y, w, h, conf, x1, y1, x2, y2])
 
     else:
-        print("⚠️ Could not find predictions in results; check results.json structure.")
+        print("⚠️ Could not find predictions in results; inspect results JSON.")
 
     # Write CSV
+    os.makedirs(os.path.dirname(CSV_OUT), exist_ok=True)
     with open(CSV_OUT, "w", newline="") as f:
         wri = csv.writer(f)
         wri.writerow([
