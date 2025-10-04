@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 
 # ====== HARD-CODED IO ======
-IN_CSV  = "Videos/Annotated/predictions_G2_V1.csv"   # from RF export
-OUT_CSV = "Videos/Annotated/track_corrected_G2_V1.csv"
+IN_CSV  = "Videos/Annotated/predictions_G2_V1-V10.csv"   # from RF export
+OUT_CSV = "Videos/Annotated/track_corrected_G2_V1-V10.csv"
 FPS     = 29.97
 H_TXT   = "H.txt"   # 3x3 homography (px->meters) from click_court_corners_8.py
 # ===========================
@@ -17,13 +17,12 @@ H_TXT   = "H.txt"   # 3x3 homography (px->meters) from click_court_corners_8.py
 COURT_SIZE   = 13.0
 GAP_BETWEEN  = 17.0
 
-# Use a larger tolerance so players hugging the rope still count “in court”
-COURT_MARGIN = 0.50  # meters
-
-def in_far_court(xm, ym, margin=COURT_MARGIN):
+# Far court world Y in [0, 13]
+# Near court world Y in [-(GAP+13), -GAP]
+def in_far_court(xm, ym, margin=0.10):
     return (-margin <= xm <= COURT_SIZE + margin) and (0.0 - margin <= ym <= COURT_SIZE + margin)
 
-def in_near_court(xm, ym, margin=COURT_MARGIN):
+def in_near_court(xm, ym, margin=0.10):
     y0 = -(GAP_BETWEEN + COURT_SIZE)
     y1 = -GAP_BETWEEN
     return (-margin <= xm <= COURT_SIZE + margin) and (y0 - margin <= ym <= y1 + margin)
@@ -369,176 +368,106 @@ def add_possession_proxies(df, H):
 # ---------- Persistent team slot assignment ----------
 def assign_team_slots_persistent(df):
     """
-    Assign exactly four active players per frame:
-      - One court gets team A (playerA_1, playerA_2)
-      - The other court gets team B (playerB_1, playerB_2)
-    Persistence by track_id. We do NOT use 'player_bench'; extra detections remain "".
-    More forgiving seeding & fallback so a player slightly outside still gets slotted.
+    After tracks exist, assign playerA_1/A_2 (near court) and playerB_1/B_2 (far court)
+    with sticky slots keyed by track_id to avoid identity flip.
     """
+    # slot memory per court: track_id -> slot
+    near_tid_to_slot = {}   # tid -> "1"/"2"
+    far_tid_to_slot  = {}   # tid -> "1"/"2"
+    # last known slot positions to help re-acquire after brief misses
+    near_lastpos = {"1": None, "2": None}
+    far_lastpos  = {"1": None, "2": None}
 
-    # --- helpers -------------------------------------------------------------
-    def dist_to_rect(xm, ym, x0, y0, x1, y1):
-        """Distance from a point to an axis-aligned rectangle."""
-        dx = 0.0
-        if xm < x0: dx = x0 - xm
-        elif xm > x1: dx = xm - x1
-        dy = 0.0
-        if ym < y0: dy = y0 - ym
-        elif ym > y1: dy = ym - y1
-        return (dx*dx + dy*dy) ** 0.5
+    # Working column
+    df["corrected_class"] = df["corrected_class"].astype(str)
 
-    def d_near(xm, ym):
-        y0 = -(GAP_BETWEEN + COURT_SIZE); y1 = -GAP_BETWEEN
-        return dist_to_rect(xm, ym, 0.0, y0, COURT_SIZE, y1)
-
-    def d_far(xm, ym):
-        return dist_to_rect(xm, ym, 0.0, 0.0, COURT_SIZE, COURT_SIZE)
-
-    def is_player_row(i):
-        lbl = str(df.at[i, "class"])
-        cc  = str(df.at[i, "corrected_class"]) if "corrected_class" in df.columns else lbl
-        return "player" in (cc.lower() or "") or "player" in (lbl.lower() or "")
-
-    # --- persistent maps -----------------------------------------------------
-    tid_to_slot = {}                          # tid -> "A_1" | "A_2" | "B_1" | "B_2"
-    slot_to_tid = {"A_1": None, "A_2": None, "B_1": None, "B_2": None}
-    seeded = False
-    # lock which court has team A after seeding
-    a_court = None      # "near" or "far"
-    b_court = None
-
-    if "corrected_class" not in df.columns:
-        df["corrected_class"] = df["class"]
-
-    # Iterate frames in order
     for f, g in df.groupby("frame", sort=True):
-        idxs = g.index.tolist()
-
-        # reset all players to no label for this frame (we’ll assign the 4 actives)
-        for i in idxs:
-            if is_player_row(i):
-                df.at[i, "corrected_class"] = ""
-
-        # collect player candidates with court & distance info
+        # collect players in each court (use corrected_class if already set, else fallback)
         cand = []
-        for i in idxs:
-            if not is_player_row(i):
+        for i in g.index:
+            if not is_player(str(df.at[i,"corrected_class"])) and not is_player(str(df.at[i,"class"])):
                 continue
-            xm = float(df.at[i, "X_m"]); ym = float(df.at[i, "Y_m"])
-            tid_raw = df.at[i, "track_id"]
-            tid = int(tid_raw) if (not pd.isna(tid_raw)) else -1
-            if tid == -1:
+            xm, ym = float(df.at[i,"X_m"]), float(df.at[i,"Y_m"])
+            tid = int(df.at[i,"track_id"]) if "track_id" in df.columns and not pd.isna(df.at[i,"track_id"]) else -1
+            conf = float(df.at[i,"confidence"])
+            if in_near_court(xm, ym):
+                cand.append(("near", i, tid, xm, ym, conf))
+            elif in_far_court(xm, ym):
+                cand.append(("far",  i, tid, xm, ym, conf))
+
+        # split and keep top-2 by confidence per court
+        near = [(i, tid, xm, ym, conf) for court,i,tid,xm,ym,conf in cand if court=="near"]
+        far  = [(i, tid, xm, ym, conf) for court,i,tid,xm,ym,conf in cand if court=="far"]
+
+        near = sorted(near, key=lambda t: (-t[4], t[2]))[:2]
+        far  = sorted(far,  key=lambda t: (-t[4], t[2]))[:2]
+
+        # helper: assign slots with stickiness
+        def assign_side(rows, tid2slot, lastpos):
+            out = []  # (row_index, label_text)
+            # order by X (left->right) for a deterministic bias
+            rows = sorted(rows, key=lambda t: t[2])  # using tid as tiebreaker already sorted by conf; we’ll re-order by X below
+            rows = sorted(rows, key=lambda t: t[2])  # dummy; we’ll compute X from df (next)
+            rows = sorted(rows, key=lambda t: float(df.at[t[0],"X_m"]))  # left->right
+
+            # Which slots are free?
+            slots = {"1": None, "2": None}
+            # First give back previously owned slots
+            for (i, tid, xm, ym, conf) in rows:
+                if tid in tid2slot:
+                    s = tid2slot[tid]
+                    slots[s] = tid
+
+            # fill remaining by proximity to lastpos (sticky)
+            unknown = [(i, tid, float(df.at[i,"X_m"]), float(df.at[i,"Y_m"])) for (i,tid,_,_,_) in rows if tid not in tid2slot]
+            open_slots = [s for s in ("1","2") if slots[s] is None]
+
+            def cost(xm, ym, slot):
+                lp = lastpos[slot]
+                if lp is None:
+                    # slight left/right bias (slot 1 = left)
+                    return (xm + (0.25 if slot=="1" else -0.25))**2 + ym*ym
+                return (xm - lp[0])**2 + (ym - lp[1])**2
+
+            for (i, tid, xm, ym) in sorted(unknown, key=lambda z: min(cost(z[2], z[3], s) for s in open_slots) if open_slots else 0):
+                if not open_slots:
+                    break
+                best_slot = min(open_slots, key=lambda s: cost(xm, ym, s))
+                lp = lastpos[best_slot]
+                if lp is not None:
+                    # avoid huge teleport flips
+                    if (xm - lp[0])**2 + (ym - lp[1])**2 > (3.0**2):
+                        continue
+                tid2slot[tid] = best_slot
+                slots[best_slot] = tid
+                lastpos[best_slot] = (xm, ym)
+                open_slots.remove(best_slot)
+
+            # emit labels
+            for s in ("1","2"):
+                if slots[s] is None: continue
+                # find row index for this tid
+                for (i, tid, xm, ym, conf) in rows:
+                    if tid == slots[s]:
+                        out.append((i, s))
+                        lastpos[s] = (xm, ym)
+                        break
+            return out
+
+        near_asg = assign_side(near, near_tid_to_slot, near_lastpos)
+        far_asg  = assign_side(far,  far_tid_to_slot,  far_lastpos)
+
+        # set labels
+        for i, s in near_asg:
+            df.at[i, "corrected_class"] = f"playerA_{s}"
+        for i, s in far_asg:
+            df.at[i, "corrected_class"] = f"playerB_{s}"
+
+        # any remaining in-court players not assigned -> bench (rare)
+        for court,i,tid,xm,ym,conf in cand:
+            if "playerA_" in str(df.at[i,"corrected_class"]) or "playerB_" in str(df.at[i,"corrected_class"]):
                 continue
-            cand.append({
-                "i": i, "tid": tid, "xm": xm, "ym": ym,
-                "in_near": in_near_court(xm, ym),
-                "in_far":  in_far_court(xm, ym),
-                "d_near":  d_near(xm, ym),
-                "d_far":   d_far(xm, ym),
-                "conf":    float(df.at[i, "confidence"]),
-            })
-
-        if len(cand) == 0:
-            continue
-
-        # strict court membership
-        near_exact = [c for c in cand if c["in_near"]]
-        far_exact  = [c for c in cand if c["in_far"]]
-
-        # --- seeding ----------------------------------------------------------
-        # seed as soon as we can plausibly find 2 per court, using nearest fallback
-        if not seeded and len(cand) >= 3:
-            # pick near group: prefer exact; else nearest by d_near
-            if len(near_exact) >= 2:
-                near_pick = sorted(near_exact, key=lambda c: (c["xm"]))[:2]
-            else:
-                near_pick = sorted(cand, key=lambda c: (c["d_near"], c["xm"]))[:2]
-
-            # pick far group among remaining (not same TIDs)
-            used = {c["tid"] for c in near_pick}
-            far_pool = [c for c in cand if c["tid"] not in used]
-            if len(far_exact) >= 2:
-                far_pick = sorted([c for c in far_exact if c["tid"] not in used], key=lambda c: c["xm"])[:2]
-            else:
-                far_pick = sorted(far_pool, key=lambda c: (c["d_far"], c["xm"]))[:2]
-
-            # ensure we have 2+2 distinct
-            if len(near_pick) == 2 and len(far_pick) == 2:
-                near_pick.sort(key=lambda c: c["xm"])
-                far_pick.sort(key=lambda c: c["xm"])
-                slot_to_tid["A_1"] = near_pick[0]["tid"]
-                slot_to_tid["A_2"] = near_pick[1]["tid"]
-                slot_to_tid["B_1"] = far_pick[0]["tid"]
-                slot_to_tid["B_2"] = far_pick[1]["tid"]
-                for s, t in slot_to_tid.items():
-                    tid_to_slot[t] = s
-                a_court, b_court = "near", "far"
-                seeded = True
-
-        # --- per-frame assignment using persistence --------------------------
-        if not seeded:
-            # cannot assign yet; wait for a workable frame
-            continue
-
-        def label_slot(i, slot):
-            team = "playerA" if slot.startswith("A_") else "playerB"
-            num  = "1" if slot.endswith("_1") else "2"
-            df.at[i, "corrected_class"] = f"{team}_{num}"
-
-        # Build preferred groups for A (in a_court) and B (in b_court),
-        # with nearest-to-court fallback if not enough exact.
-        def pick_group(target_court):
-            if target_court == "near":
-                exact = [c for c in cand if c["in_near"]]
-                if len(exact) >= 2:
-                    g = sorted(exact, key=lambda c: c["xm"])[:3]
-                else:
-                    g = sorted(cand, key=lambda c: (c["d_near"], c["xm"]))[:3]
-            else:
-                exact = [c for c in cand if c["in_far"]]
-                if len(exact) >= 2:
-                    g = sorted(exact, key=lambda c: c["xm"])[:3]
-                else:
-                    g = sorted(cand, key=lambda c: (c["d_far"], c["xm"]))[:3]
-            return g
-
-        group_A = pick_group(a_court)
-        group_B = pick_group(b_court)
-
-        # Prefer to keep existing TIDs in their slots if present
-        assigned_tids = set()
-
-        def keep_persisted(slots, group):
-            present_by_tid = {c["tid"]: c for c in group}
-            for s in slots:
-                tid = slot_to_tid[s]
-                if tid is not None and tid in present_by_tid and tid not in assigned_tids:
-                    label_slot(present_by_tid[tid]["i"], s)
-                    assigned_tids.add(tid)
-
-        keep_persisted(["A_1","A_2"], group_A)
-        keep_persisted(["B_1","B_2"], group_B)
-
-        # Fill remaining slots from left→right among unassigned in their groups
-        def fill_slots(slots, group):
-            nonlocal slot_to_tid, tid_to_slot
-            remaining = [c for c in sorted(group, key=lambda c: c["xm"]) if c["tid"] not in assigned_tids]
-            for s in slots:
-                if slot_to_tid[s] in assigned_tids:
-                    continue
-                if not remaining:
-                    continue
-                c = remaining.pop(0)
-                slot_to_tid[s] = c["tid"]
-                tid_to_slot[c["tid"]] = s
-                assigned_tids.add(c["tid"])
-                label_slot(c["i"], s)
-
-        fill_slots(["A_1","A_2"], group_A)
-        fill_slots(["B_1","B_2"], group_B)
-
-        # Done: exactly four players labeled (if at least four tracked TIDs are visible).
-        # Everyone else stays "".
+            df.at[i, "corrected_class"] = "player_bench"
 
     return df
 

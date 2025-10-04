@@ -1,6 +1,6 @@
 import cv2, os
 
-video_path = "/Users/jameselsner/Desktop/Projects/ddc-vision/Videos/20_July_2025.mp4"
+video_path = "/Users/jameselsner/Desktop/Escape/Games/13Sep2025/LaterGames.mp4"
 output_folder = "frames_output"
 seconds_between = 2.0
 

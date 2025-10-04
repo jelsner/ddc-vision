@@ -7,16 +7,12 @@ import numpy as np
 from collections import defaultdict, deque
 
 # === CONFIG ===
-VIDEO_IN   = "/Users/jameselsner/Desktop/Escape/Rallies/ForPrediction/Rally2.mp4"
-CSV_IN     = "Videos/Annotated/track_corrected_rally2.csv"   # frame-wise detections
-VIDEO_OUT  = "Videos/Annotated/annotated_rally2_tracked_ms.mp4"
+VIDEO_IN   = "/Users/jameselsner/Desktop/Escape/Games/13Sep2025/G2_V1.mov"
+CSV_IN     = "Videos/Annotated/track_corrected_G2_V1.csv"   # frame-wise detections
+VIDEO_OUT  = "/Users/jameselsner/Desktop/Escape/Games/13Sep2025/G2_V1a.mov"
 
 # Homography (pixel -> meters) saved by your click tool (np.savetxt)
 H_PATH     = "H.txt"
-
-# Optional: export an enhanced CSV with speed & metric coords
-WRITE_CSV_OUT = False
-CSV_OUT       = "Videos/Annotated/track_corrected_rally2_with_ms.csv"
 
 MIN_CONF   = 0.00  # keep everything already exported; raise if needed
 TRAIL_LEN  = 48    # number of past centers to draw per track
@@ -40,6 +36,9 @@ Z_MAX_M   = 12.0   # plausible apex height in meters (tune to your footage)
 EMA_ALPHA_V   = 0.08   # EMA for speed readout (0..1; higher = snappier)
 EMA_ALPHA_Z   = 0.20   # EMA for Z proxy (smoother height)
 MAX_ACC_MPS2  = 80.0   # acceleration clamp for *velocity change* (try 50–120)
+
+# Render options
+SKIP_BENCH   = False    # don't draw boxes/labels for player_bench rows
 # =============
 
 # BGR colors
@@ -58,8 +57,9 @@ def class_to_color(name: str):
     if "disc_yellow" in n:  return YELLOW, YELLOW
     if n == "disc":         return GREEN, GREEN
     # players (team A / B by substring)
-    if "playera" in n or "lead_playera" in n: return BLUE, BLUE
-    if "playerb" in n or "lead_playerb" in n: return WHITE, WHITE
+    if "playera" in n:      return BLUE, BLUE
+    if "playerb" in n:      return WHITE, WHITE
+    if "player_bench" in n: return GRAY, GRAY
     # default
     return GREEN, GREEN
 
@@ -96,13 +96,16 @@ def load_by_frame(csv_path):
                 w = float(row["width"]); h = float(row["height"])
             except Exception:
                 continue
+            # *** ALWAYS prefer corrected_class if present ***
             cls = (row.get("corrected_class") if has_corr else row.get("class")) or "obj"
             cls = str(cls)
+
             # track id if present
             tid = -1
             if "track_id" in row and row["track_id"] not in (None, "", "nan"):
                 try: tid = int(float(row["track_id"]))
                 except: tid = -1
+
             t_s = None
             if has_time:
                 try: t_s = float(row.get("time_s"))
@@ -171,18 +174,6 @@ def main():
 
     writer = cv2.VideoWriter(VIDEO_OUT, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H_px))
 
-    # optional enhanced CSV writer
-    csv_out_writer = None
-    if WRITE_CSV_OUT:
-        # Read input header to preserve column order + add new fields at end
-        with open(CSV_IN, "r", newline="") as f_in:
-            r_in = csv.DictReader(f_in)
-            base_fields = r_in.fieldnames or []
-        add_fields = ["track_speed_ms", "center_X_m", "center_Y_m", "center_Z_proxy_m"]
-        out_fields = base_fields + [f for f in add_fields if f not in base_fields]
-        csv_out_writer = csv.DictWriter(open(CSV_OUT, "w", newline=""), fieldnames=out_fields)
-        csv_out_writer.writeheader()
-
     # trail state: track_id -> deque[(x,y), ...]
     trails = {}
     # kinematic state: tid -> {last_XYZ_m, last_t, ema_v, v_prev, ema_z}
@@ -199,6 +190,10 @@ def main():
         default_t = f / FPS  # used if no time_s
 
         for d in dets:
+            # optionally ignore bench rows
+            if SKIP_BENCH and d["cls"].lower() == "player_bench":
+                continue
+
             x1, y1, x2, y2 = to_xyxy(d["x"], d["y"], d["w"], d["h"])
             cx = (x1 + x2) // 2; cy = (y1 + y2) // 2
             t_now = d["time_s"] if d["time_s"] is not None else default_t
@@ -211,7 +206,6 @@ def main():
             tid = int(d.get("track_id", -1))
             is_disc = ("disc" in (d["cls"] or "").lower())
 
-            Z_m_proxy = None
             if tid != -1 and X_m is not None and Y_m is not None:
                 # Z proxy from bbox size (players -> 0 height)
                 z_proxy = disc_height_proxy_m(d["w"], d["h"]) if is_disc else 0.0
@@ -226,12 +220,10 @@ def main():
                         "ema_z": float(z_proxy),
                     }
                     spd = 0.0
-                    Z_m_proxy = float(z_proxy)
                 else:
                     # smooth Z
                     prev["ema_z"] = float(EMA_ALPHA_Z * z_proxy + (1.0 - EMA_ALPHA_Z) * prev["ema_z"])
                     Z_m = prev["ema_z"] if is_disc else 0.0
-                    Z_m_proxy = float(Z_m)
 
                     # current 3D position and velocity
                     p_now = np.array([X_m, Y_m, Z_m], dtype=np.float64)
@@ -256,7 +248,7 @@ def main():
             box_color, text_color = class_to_color(d["cls"])
             cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, BOX_THICK)
 
-            lbl_base = d["cls"]
+            lbl_base = d["cls"]            # <- already the corrected_class when present
             if tid != -1:
                 lbl_base += f" #{tid}"
             if spd is not None:
@@ -273,28 +265,6 @@ def main():
                 trails[tid].append((cx, cy))
 
             total_boxes += 1
-
-            # write enhanced CSV row if requested
-            if csv_out_writer is not None:
-                out_row = {
-                    "frame": f,
-                    "time_s": t_now,
-                    "class": d["cls"],
-                    "confidence": d["conf"],
-                    "x": d["x"], "y": d["y"],
-                    "width": d["w"], "height": d["h"],
-                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                    "track_id": tid if tid != -1 else ""
-                }
-                out_row["track_speed_ms"] = (None if spd is None else float(spd))
-                out_row["center_X_m"] = (None if X_m is None else float(X_m))
-                out_row["center_Y_m"] = (None if Y_m is None else float(Y_m))
-                out_row["center_Z_proxy_m"] = (None if Z_m_proxy is None else float(Z_m_proxy))
-
-                for k in csv_out_writer.fieldnames:
-                    if k not in out_row:
-                        out_row[k] = ""
-                csv_out_writer.writerow(out_row)
 
         # draw trails (under labels so they don’t obscure text)
         for tid, pts in trails.items():
@@ -321,9 +291,7 @@ def main():
 
     cap.release()
     writer.release()
-    if csv_out_writer:
-        print(f"📄 Saved enhanced CSV with m/s: {CSV_OUT}")
-    print(f"✅ Saved video: {VIDEO_OUT}  (drew {total_boxes} boxes over {f} frames)")
+    print(f"✅ Saved: {VIDEO_OUT}")
 
 if __name__ == "__main__":
     main()
