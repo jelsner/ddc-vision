@@ -1,20 +1,22 @@
-# rf_video_export_flex.py (resilient)
+# rf_detector.py (resilient)
 import os, csv, json, tempfile, shutil
 import cv2
 from roboflow import Roboflow
 
 # ===== CONFIG =====
-API_KEY   = "xxxx"
-WORKSPACE = None              # or "your-workspace-slug"; None = default
-PROJECT   = "escape-frisbee-game-3xwgq"
-VERSION   = "1"
+API_KEY   = "xxxxx"
+WORKSPACE = None
+PROJECT   = "ddc_game1_objectdetection-iqa0h"
+VERSION   = "4"
 
-VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Games/13Sep2025/G2_V1.mov"
-# Prefer to let server pick fps; fallback 5 for big files
-FPS_PRIMARY = 29            # None or a small int like 5
-PRED_TYPE   = "batch-video"   # "batch-video" recommended
-CSV_OUT     = "Videos/Annotated/predictions_G2_V1.csv"
-# =================
+VIDEO_IN  = "/Users/jameselsner/Desktop/Escape/Games/13Sep2025/Game4.mov"
+FPS_PRIMARY = 29
+PRED_TYPE   = "batch-video"
+CSV_OUT     = "Videos/Annotated/predictions_Game4.csv"
+
+# NEW: inference knobs (percent, not 0–1)
+CONF_PCT    = 5     # 5% ≈ 0.05 confidence threshold
+OVERLAP_PCT = 30    # NMS IoU threshold (typical 20–50)
 
 def to_xyxy(x, y, w, h):
     x1 = x - w/2.0; y1 = y - h/2.0
@@ -56,7 +58,7 @@ def get_model():
     return project.version(str(VERSION)).model
 
 def upload_and_poll(model, video_path, fps, pred_type):
-    # Returns (results_dict, signed_url) or raises
+    # ❌ do NOT pass confidence / overlap here
     job_id, signed_url, expire_time = model.predict_video(
         video_path,
         fps=fps,

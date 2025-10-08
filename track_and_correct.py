@@ -5,10 +5,10 @@ import numpy as np
 import pandas as pd
 
 # ====== HARD-CODED IO ======
-IN_CSV  = "Videos/Annotated/predictions_G2_V1.csv"   # from RF export
-OUT_CSV = "Videos/Annotated/track_corrected_G2_V1.csv"
+IN_CSV  = "Videos/Annotated/predictions_Game4.csv"   # from RF export
+OUT_CSV = "Videos/Annotated/track_corrected_Game4.csv"
 FPS     = 29.97
-H_TXT   = "H.txt"   # 3x3 homography (px->meters) from click_court_corners_8.py
+H_TXT   = "H.txt"   # 3x3 homography (px->meters)
 # ===========================
 
 # ------------------------
@@ -17,13 +17,10 @@ H_TXT   = "H.txt"   # 3x3 homography (px->meters) from click_court_corners_8.py
 COURT_SIZE   = 13.0
 GAP_BETWEEN  = 17.0
 
-# Use a larger tolerance so players hugging the rope still count “in court”
-COURT_MARGIN = 0.50  # meters
-
-def in_far_court(xm, ym, margin=COURT_MARGIN):
+def in_far_court(xm, ym, margin=0.10):
     return (-margin <= xm <= COURT_SIZE + margin) and (0.0 - margin <= ym <= COURT_SIZE + margin)
 
-def in_near_court(xm, ym, margin=COURT_MARGIN):
+def in_near_court(xm, ym, margin=0.10):
     y0 = -(GAP_BETWEEN + COURT_SIZE)
     y1 = -GAP_BETWEEN
     return (-margin <= xm <= COURT_SIZE + margin) and (y0 - margin <= ym <= y1 + margin)
@@ -48,27 +45,35 @@ ACC_MAX_UP         = 18.0  # m/s^2 max increase
 ACC_MAX_DOWN       = 60.0  # m/s^2 max decrease
 SPEED_MEDIAN_WIN   = 5     # rolling median (odd>=1)
 
-COLOR_FLIP_MARGIN  = 0.15
 EMA_ALPHA          = 0.30
 
-# Possession proxy (keeps disc alive when occluded in a hand)
+# ---------- Possession proxy (keeps disc alive when occluded in a hand) ----------
 PROXY_ATTACH_RADIUS_M = 0.80   # disc attaches to nearest player within this radius
 PROXY_MAX_FRAMES      = 8      # max consecutive proxy frames per color
 PROXY_BOX_PX          = 14     # small visual box size (pixels)
 PROXY_CONF            = 0.20   # low confidence marker
 
-# Classes
-DISC_SET        = {"disc_red", "disc_yellow"}  # no generic "disc"
-PLAYER_TOKENS   = ("playera_", "playerb_", "lead_playera", "lead_playerb", "player")  # permissive
+# ---------- Motion-aware slot persistence tunables ----------
+SWAP_GRACE        = 12     # frames: tolerate a missing slot before reassigning
+EMA_VEL           = 0.50   # 0..1: EMA for per-slot velocity
+MAX_CLAIM_DIST_M  = 5.0    # cap distance from predicted pos to claim a candidate
+
+# Motion cost weights for picking replacement when a slot's TID is missing
+ALPHA_DIST = 1.0   # meters term
+BETA_DIR   = 0.5   # direction mismatch penalty
+GAMMA_AREA = 0.15  # abrupt bbox-area jump penalty (relative)
+
+# ---------- Classes expected from detector ----------
+DISC_SET      = {"disc_red", "disc_yellow"}
+PLAYER_LABELS = {"player"}   # detector class for any player
 
 def is_disc(lbl: str) -> bool:
     return (lbl or "").lower() in DISC_SET
 
 def is_player(lbl: str) -> bool:
-    if not lbl: return False
-    l = lbl.lower()
-    return any(tok in l for tok in PLAYER_TOKENS)
+    return (lbl or "").lower() in PLAYER_LABELS or "player" in (lbl or "").lower()
 
+# ---------- Basic helpers ----------
 def load_homography_from_txt(path):
     H = np.loadtxt(path).astype(np.float32)
     if H.shape != (3,3):
@@ -91,6 +96,7 @@ def iou_xyxy(a, b):
     ix2, iy2 = min(ax2, bx2), min(ay2, by2)
     iw, ih = max(0.0, ix2-ix1), max(0.0, iy2-iy1)
     inter = iw * ih
+    ua = (ax2-ax1)*(ay1-ay2) if False else (ax2-ax1)*(ay2-ay1)  # (avoid typo; keep ua positive)
     ua = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter + 1e-6
     return inter / ua
 
@@ -105,7 +111,7 @@ def suppress_player_duplicates(df, iou_thresh=0.60):
     keep = []
     for f, g in df.groupby("frame", sort=True):
         idx = list(g.index)
-        cand = [i for i in idx if is_player(str(df.at[i,"class"])) or "player" in str(df.at[i,"class"]).lower()]
+        cand = [i for i in idx if is_player(str(df.at[i,"class"]))]
         cand = sorted(cand, key=lambda i: float(df.at[i,"confidence"]), reverse=True)
         removed = set()
         kept = []
@@ -117,8 +123,7 @@ def suppress_player_duplicates(df, iou_thresh=0.60):
                 if iou_from_rows(df.loc[cand[i]], df.loc[cand[j]]) >= iou_thresh:
                     removed.add(cand[j])
         keep.extend(kept)
-        # keep all non-player rows too
-        keep.extend([i for i in idx if i not in cand])
+        keep.extend([i for i in idx if i not in cand])  # include non-player rows
     keep = sorted(set(keep))
     return df.loc[keep].reset_index(drop=True)
 
@@ -132,15 +137,8 @@ class Track:
         self.last_box_px = bbox_xywh_to_xyxy(row["x"], row["y"], row["width"], row["height"])
         self.last_xy_m  = (float(row["X_m"]), float(row["Y_m"]))
         self.family = "disc" if is_disc(row["class"]) else ("player" if is_player(row["class"]) else "other")
-        self.color_locked = False
-        self.locked_color = None
         self.last_speed = 0.0
         self.speed_hist = deque(maxlen=max(1, SPEED_MEDIAN_WIN))
-
-        if self.family == "disc" and row["class"] in {"disc_red", "disc_yellow"}:
-            self.color_locked = True
-            self.locked_color = row["class"]
-
         self.class_counts = Counter([row["class"]])
         self.ema_conf     = {row["class"]: float(row["confidence"])}
 
@@ -171,16 +169,6 @@ class Track:
 
     def add(self, row):
         lbl = row["class"]; conf = float(row["confidence"])
-
-        if self.family == "disc" and lbl in {"disc_red", "disc_yellow"}:
-            if not self.color_locked:
-                self.color_locked = True
-                self.locked_color = lbl
-            else:
-                ema_new = EMA_ALPHA * conf + (1-EMA_ALPHA) * self.ema_conf.get(lbl, conf)
-                ema_cur = self.ema_conf.get(self.locked_color, 0.0)
-                if ema_new >= ema_cur + COLOR_FLIP_MARGIN:
-                    self.locked_color = lbl
 
         dt_frames = max(1, int(row["frame"]) - self.last_frame)
         dt = dt_frames / FPS
@@ -216,8 +204,12 @@ class Track:
         self.ema_conf[lbl] = EMA_ALPHA * conf + (1.0 - EMA_ALPHA) * self.ema_conf.get(lbl, conf)
 
     def corrected_label(self):
-        if self.family == "disc" and self.color_locked:
-            return self.locked_color
+        # For discs, keep raw color class if present
+        if self.family == "disc":
+            for lbl in ("disc_red","disc_yellow"):
+                if lbl in self.class_counts:
+                    return lbl
+        # For players, keep majority raw label (usually "player")
         best = None
         best_key = (-1, -1.0)
         for lbl, cnt in self.class_counts.items():
@@ -259,17 +251,57 @@ def build_tracks(df):
             tracks.append(t)
     return tracks
 
+# ---------- Disc selection helpers ----------
+def _nearest_player_dist_m(df_frame, xm, ym):
+    best = 1e9
+    for _, r in df_frame.iterrows():
+        if "player" in str(r["class"]).lower() or "player" in str(r.get("corrected_class", "")).lower():
+            dx = float(r["X_m"]) - xm
+            dy = float(r["Y_m"]) - ym
+            d = math.hypot(dx, dy)
+            if d < best:
+                best = d
+    return best
+
 def enforce_one_red_one_yellow(df):
+    """
+    For each frame & color choose ONE disc using a composite score that favors:
+      - detections inside either court (in-play) over outside,
+      - proximity to any player (likely hand-held),
+      - higher motion (speed_ms),
+      - higher model confidence.
+    """
+    W_IN   = 2.0   # inside-court bonus
+    W_NEAR = 1.2   # near-player bonus (inverse distance)
+    W_SPD  = 0.7   # speed bonus
+    W_CONF = 1.0   # base confidence
+
     for f, g in df.groupby("frame", sort=True):
-        for color in ["disc_red", "disc_yellow"]:
-            idx = g[g["corrected_class"] == color].index.tolist()
-            if len(idx) > 1:
-                keep = df.loc[idx]["confidence"].idxmax()
-                for i in idx:
-                    if i != keep:
-                        # demote extras to the same color but mark as secondary? simplest: drop to lowest confidence
-                        df.at[i, "corrected_class"] = color
-                        # Optionally you could blank these or set a flag; we leave as-is.
+        g = g.copy()
+        for color in ("disc_red", "disc_yellow"):
+            idxs = g.index[g["corrected_class"] == color].tolist()
+            if len(idxs) <= 1:
+                continue
+
+            # Score each candidate
+            scores = []
+            for i in idxs:
+                xm = float(df.at[i, "X_m"]); ym = float(df.at[i, "Y_m"])
+                conf = float(df.at[i, "confidence"])
+                spd  = float(df.at[i, "speed_ms"]) if not pd.isna(df.at[i, "speed_ms"]) else 0.0
+
+                in_play = in_near_court(xm, ym) or in_far_court(xm, ym)
+                near_d  = _nearest_player_dist_m(g, xm, ym)
+                near_term = 1.0 / max(near_d, 0.4)  # saturate for very small distances
+
+                score = (W_CONF*conf) + (W_SPD*spd) + (W_NEAR*near_term) + (W_IN*(1.0 if in_play else 0.0))
+                scores.append((score, i))
+
+            keep_i = max(scores, key=lambda t: t[0])[1]
+            # Demote the others (blank them)
+            for i in idxs:
+                if i != keep_i:
+                    df.at[i, "corrected_class"] = ""
     return df
 
 # ---------- Possession proxy (add synthetic disc rows during hand occlusion) ----------
@@ -280,11 +312,11 @@ def add_possession_proxies(df, H):
     """
     cols = ["frame","time_s","class","class_id","x","y","width","height",
             "confidence","x1","y1","x2","y2"]
-    ensure_cols = [c for c in cols if c not in df.columns]
-    for c in ensure_cols:
-        df[c] = np.nan
+    for c in cols:
+        if c not in df.columns:
+            df[c] = np.nan
 
-    # build quick access: per-frame players with pixel+meter centers
+    # per-frame players with pixel+meter centers
     per_frame = {}
     for f, g in df.groupby("frame", sort=True):
         items = []
@@ -296,10 +328,8 @@ def add_possession_proxies(df, H):
         per_frame[int(f)] = items
 
     # disc state
-    state = {
-        "disc_red":    {"last_pos_m": None, "missing": 0},
-        "disc_yellow": {"last_pos_m": None, "missing": 0},
-    }
+    state = {"disc_red": {"last_pos_m": None, "missing": 0},
+             "disc_yellow": {"last_pos_m": None, "missing": 0}}
 
     new_rows = []
     frames_sorted = sorted(df["frame"].astype(int).unique())
@@ -308,17 +338,14 @@ def add_possession_proxies(df, H):
         t_sec = g["time_s"].iloc[0] if "time_s" in g.columns and len(g) else None
 
         for color in ("disc_red","disc_yellow"):
-            # present?
             present = (g["class"] == color).any()
             if present:
-                # update last_pos_m from highest-conf one
                 gg = g[g["class"] == color].sort_values("confidence", ascending=False)
                 if len(gg):
                     state[color]["last_pos_m"] = (float(gg.iloc[0]["X_m"]), float(gg.iloc[0]["Y_m"]))
                 state[color]["missing"] = 0
                 continue
 
-            # missing
             state[color]["missing"] += 1
             if state[color]["missing"] > PROXY_MAX_FRAMES:
                 continue
@@ -326,7 +353,6 @@ def add_possession_proxies(df, H):
             if last is None:
                 continue
 
-            # find nearest player in this frame
             cand_players = per_frame.get(int(f), [])
             if not cand_players:
                 continue
@@ -340,7 +366,6 @@ def add_possession_proxies(df, H):
                 continue
 
             cx, cy, xm, ym = best
-            # create synthetic small box around player center
             w = h = PROXY_BOX_PX
             x1 = cx - w/2.0; y1 = cy - h/2.0; x2 = cx + w/2.0; y2 = cy + h/2.0
             new_rows.append({
@@ -357,7 +382,6 @@ def add_possession_proxies(df, H):
 
     if new_rows:
         df2 = pd.DataFrame(new_rows)
-        # ensure same dtypes
         for c in df.columns:
             if c not in df2.columns:
                 df2[c] = np.nan
@@ -366,179 +390,200 @@ def add_possession_proxies(df, H):
         df.reset_index(drop=True, inplace=True)
     return df
 
-# ---------- Persistent team slot assignment ----------
+# ---------- Motion-aware persistent team slot assignment ----------
 def assign_team_slots_persistent(df):
     """
-    Assign exactly four active players per frame:
-      - One court gets team A (playerA_1, playerA_2)
-      - The other court gets team B (playerB_1, playerB_2)
-    Persistence by track_id. We do NOT use 'player_bench'; extra detections remain "".
-    More forgiving seeding & fallback so a player slightly outside still gets slotted.
+    Motion-aware persistent team slots:
+      - Seed by bbox area (2 largest -> A_1/A_2; next two smallest -> B_2/B_1 with larger= B_1).
+      - Maintain per-slot motion state (pos, EMA velocity, last area).
+      - If a slot's TID is missing, claim the candidate minimizing motion-aware cost.
+      - No bench; extras remain "".
     """
 
-    # --- helpers -------------------------------------------------------------
-    def dist_to_rect(xm, ym, x0, y0, x1, y1):
-        """Distance from a point to an axis-aligned rectangle."""
-        dx = 0.0
-        if xm < x0: dx = x0 - xm
-        elif xm > x1: dx = xm - x1
-        dy = 0.0
-        if ym < y0: dy = y0 - ym
-        elif ym > y1: dy = ym - y1
-        return (dx*dx + dy*dy) ** 0.5
+    # persistent maps
+    tid_to_slot    = {}
+    slot_to_tid    = {"A_1": None, "A_2": None, "B_1": None, "B_2": None}
+    slot_last_seen = {"A_1": -10**9, "A_2": -10**9, "B_1": -10**9, "B_2": -10**9}
+    seeded = False
 
-    def d_near(xm, ym):
-        y0 = -(GAP_BETWEEN + COURT_SIZE); y1 = -GAP_BETWEEN
-        return dist_to_rect(xm, ym, 0.0, y0, COURT_SIZE, y1)
-
-    def d_far(xm, ym):
-        return dist_to_rect(xm, ym, 0.0, 0.0, COURT_SIZE, COURT_SIZE)
+    # per-slot motion state
+    slot_state = {
+        "A_1": {"pos": None, "vel": np.zeros(2), "area": None},
+        "A_2": {"pos": None, "vel": np.zeros(2), "area": None},
+        "B_1": {"pos": None, "vel": np.zeros(2), "area": None},
+        "B_2": {"pos": None, "vel": np.zeros(2), "area": None},
+    }
 
     def is_player_row(i):
-        lbl = str(df.at[i, "class"])
-        cc  = str(df.at[i, "corrected_class"]) if "corrected_class" in df.columns else lbl
-        return "player" in (cc.lower() or "") or "player" in (lbl.lower() or "")
+        lbl = str(df.at[i, "class"]).lower()
+        cc  = str(df.at[i, "corrected_class"]).lower() if "corrected_class" in df.columns else lbl
+        return ("player" in lbl) or ("player" in cc)
 
-    # --- persistent maps -----------------------------------------------------
-    tid_to_slot = {}                          # tid -> "A_1" | "A_2" | "B_1" | "B_2"
-    slot_to_tid = {"A_1": None, "A_2": None, "B_1": None, "B_2": None}
-    seeded = False
-    # lock which court has team A after seeding
-    a_court = None      # "near" or "far"
-    b_court = None
+    def label_slot(i, slot):
+        team = "playerA" if slot.startswith("A_") else "playerB"
+        num  = "1" if slot.endswith("_1") else "2"
+        df.at[i, "corrected_class"] = f"{team}_{num}"
 
-    if "corrected_class" not in df.columns:
-        df["corrected_class"] = df["class"]
+    def update_slot_state(slot, xm, ym, area, dt):
+        st = slot_state[slot]
+        p_now = np.array([xm, ym], dtype=float)
+        if st["pos"] is None:
+            st["vel"] = np.zeros(2)
+        else:
+            v_inst = (p_now - st["pos"]) / max(dt, 1e-3)
+            st["vel"] = EMA_VEL * v_inst + (1.0 - EMA_VEL) * st["vel"]
+        st["pos"]  = p_now
+        st["area"] = area
 
-    # Iterate frames in order
+    # precompute frame->time
+    frame_time = {}
     for f, g in df.groupby("frame", sort=True):
+        if "time_s" in g.columns and g["time_s"].notna().any():
+            frame_time[int(f)] = float(g["time_s"].iloc[0])
+        else:
+            frame_time[int(f)] = int(f) / FPS
+
+    prev_t = None
+
+    for f, g in df.groupby("frame", sort=True):
+        t_now = frame_time[int(f)]
+        dt = (t_now - prev_t) if (prev_t is not None) else (1.0 / FPS)
+        prev_t = t_now
+
         idxs = g.index.tolist()
 
-        # reset all players to no label for this frame (we’ll assign the 4 actives)
+        # Clear player labels for this frame
         for i in idxs:
             if is_player_row(i):
                 df.at[i, "corrected_class"] = ""
 
-        # collect player candidates with court & distance info
+        # Candidate players
         cand = []
         for i in idxs:
             if not is_player_row(i):
                 continue
-            xm = float(df.at[i, "X_m"]); ym = float(df.at[i, "Y_m"])
             tid_raw = df.at[i, "track_id"]
-            tid = int(tid_raw) if (not pd.isna(tid_raw)) else -1
-            if tid == -1:
+            if pd.isna(tid_raw):
                 continue
-            cand.append({
-                "i": i, "tid": tid, "xm": xm, "ym": ym,
-                "in_near": in_near_court(xm, ym),
-                "in_far":  in_far_court(xm, ym),
-                "d_near":  d_near(xm, ym),
-                "d_far":   d_far(xm, ym),
-                "conf":    float(df.at[i, "confidence"]),
-            })
+            tid = int(tid_raw)
+            if tid < 0:
+                continue
+            xm = float(df.at[i, "X_m"]); ym = float(df.at[i, "Y_m"])
+            w  = float(df.at[i, "width"]); h = float(df.at[i, "height"])
+            area = max(1.0, w*h)
+            cand.append({"i": i, "tid": tid, "xm": xm, "ym": ym, "area": area})
 
-        if len(cand) == 0:
+        if not cand:
             continue
 
-        # strict court membership
-        near_exact = [c for c in cand if c["in_near"]]
-        far_exact  = [c for c in cand if c["in_far"]]
-
-        # --- seeding ----------------------------------------------------------
-        # seed as soon as we can plausibly find 2 per court, using nearest fallback
-        if not seeded and len(cand) >= 3:
-            # pick near group: prefer exact; else nearest by d_near
-            if len(near_exact) >= 2:
-                near_pick = sorted(near_exact, key=lambda c: (c["xm"]))[:2]
-            else:
-                near_pick = sorted(cand, key=lambda c: (c["d_near"], c["xm"]))[:2]
-
-            # pick far group among remaining (not same TIDs)
-            used = {c["tid"] for c in near_pick}
-            far_pool = [c for c in cand if c["tid"] not in used]
-            if len(far_exact) >= 2:
-                far_pick = sorted([c for c in far_exact if c["tid"] not in used], key=lambda c: c["xm"])[:2]
-            else:
-                far_pick = sorted(far_pool, key=lambda c: (c["d_far"], c["xm"]))[:2]
-
-            # ensure we have 2+2 distinct
-            if len(near_pick) == 2 and len(far_pick) == 2:
-                near_pick.sort(key=lambda c: c["xm"])
-                far_pick.sort(key=lambda c: c["xm"])
-                slot_to_tid["A_1"] = near_pick[0]["tid"]
-                slot_to_tid["A_2"] = near_pick[1]["tid"]
-                slot_to_tid["B_1"] = far_pick[0]["tid"]
-                slot_to_tid["B_2"] = far_pick[1]["tid"]
-                for s, t in slot_to_tid.items():
-                    tid_to_slot[t] = s
-                a_court, b_court = "near", "far"
-                seeded = True
-
-        # --- per-frame assignment using persistence --------------------------
+        # ---------- seeding by area (first workable frame) ----------
         if not seeded:
-            # cannot assign yet; wait for a workable frame
-            continue
+            if len(cand) >= 4:
+                by_area_desc = sorted(cand, key=lambda c: c["area"], reverse=True)
+                a1, a2 = by_area_desc[0], by_area_desc[1]
+                by_area_asc = sorted(by_area_desc[2:], key=lambda c: c["area"])
+                b2, b1 = by_area_asc[0], by_area_asc[1]   # larger of the two small = B_1
 
-        def label_slot(i, slot):
-            team = "playerA" if slot.startswith("A_") else "playerB"
-            num  = "1" if slot.endswith("_1") else "2"
-            df.at[i, "corrected_class"] = f"{team}_{num}"
+                slot_to_tid["A_1"] = a1["tid"]; slot_last_seen["A_1"] = f
+                slot_to_tid["A_2"] = a2["tid"]; slot_last_seen["A_2"] = f
+                slot_to_tid["B_1"] = b1["tid"]; slot_last_seen["B_1"] = f
+                slot_to_tid["B_2"] = b2["tid"]; slot_last_seen["B_2"] = f
+                for s, tslot in slot_to_tid.items():
+                    if tslot is not None:
+                        tid_to_slot[tslot] = s
 
-        # Build preferred groups for A (in a_court) and B (in b_court),
-        # with nearest-to-court fallback if not enough exact.
-        def pick_group(target_court):
-            if target_court == "near":
-                exact = [c for c in cand if c["in_near"]]
-                if len(exact) >= 2:
-                    g = sorted(exact, key=lambda c: c["xm"])[:3]
-                else:
-                    g = sorted(cand, key=lambda c: (c["d_near"], c["xm"]))[:3]
+                for slot, c in [("A_1", a1), ("A_2", a2), ("B_1", b1), ("B_2", b2)]:
+                    update_slot_state(slot, c["xm"], c["ym"], c["area"], dt)
+
+                present = {c["tid"]: c for c in cand}
+                for s in ["A_1","A_2","B_1","B_2"]:
+                    tslot = slot_to_tid[s]
+                    if tslot in present:
+                        label_slot(present[tslot]["i"], s)
+
+                seeded = True
             else:
-                exact = [c for c in cand if c["in_far"]]
-                if len(exact) >= 2:
-                    g = sorted(exact, key=lambda c: c["xm"])[:3]
-                else:
-                    g = sorted(cand, key=lambda c: (c["d_far"], c["xm"]))[:3]
-            return g
+                continue  # wait until 4 players to seed
 
-        group_A = pick_group(a_court)
-        group_B = pick_group(b_court)
-
-        # Prefer to keep existing TIDs in their slots if present
+        # ---------- persistence with motion ----------
         assigned_tids = set()
+        present_by_tid = {c["tid"]: c for c in cand}
 
-        def keep_persisted(slots, group):
-            present_by_tid = {c["tid"]: c for c in group}
-            for s in slots:
-                tid = slot_to_tid[s]
-                if tid is not None and tid in present_by_tid and tid not in assigned_tids:
-                    label_slot(present_by_tid[tid]["i"], s)
-                    assigned_tids.add(tid)
-
-        keep_persisted(["A_1","A_2"], group_A)
-        keep_persisted(["B_1","B_2"], group_B)
-
-        # Fill remaining slots from left→right among unassigned in their groups
-        def fill_slots(slots, group):
-            nonlocal slot_to_tid, tid_to_slot
-            remaining = [c for c in sorted(group, key=lambda c: c["xm"]) if c["tid"] not in assigned_tids]
-            for s in slots:
-                if slot_to_tid[s] in assigned_tids:
-                    continue
-                if not remaining:
-                    continue
-                c = remaining.pop(0)
-                slot_to_tid[s] = c["tid"]
-                tid_to_slot[c["tid"]] = s
-                assigned_tids.add(c["tid"])
+        # 1) keep existing TIDs if visible
+        for s in ["A_1","A_2","B_1","B_2"]:
+            tid = slot_to_tid[s]
+            if tid is not None and tid in present_by_tid:
+                c = present_by_tid[tid]
                 label_slot(c["i"], s)
+                slot_last_seen[s] = f
+                update_slot_state(s, c["xm"], c["ym"], c["area"], dt)
+                assigned_tids.add(tid)
 
-        fill_slots(["A_1","A_2"], group_A)
-        fill_slots(["B_1","B_2"], group_B)
+        # 2) claim best candidate for any missing slot using motion-aware cost
+        def motion_cost(slot, c):
+            st = slot_state[slot]
+            if st["pos"] is None:
+                # no prior; weaker constraint
+                d = 0.0
+                dir_pen = 0.0
+            else:
+                p_pred = st["pos"] + st["vel"] * max(dt, 1e-3)
+                d = float(np.linalg.norm(np.array([c["xm"], c["ym"]]) - p_pred))
+                v = st["vel"]
+                if np.linalg.norm(v) < 1e-6:
+                    dir_pen = 0.0
+                else:
+                    v_unit = v / (np.linalg.norm(v) + 1e-9)
+                    step   = np.array([c["xm"], c["ym"]]) - st["pos"]
+                    if np.linalg.norm(step) < 1e-6:
+                        dir_pen = 0.0
+                    else:
+                        step_unit = step / (np.linalg.norm(step) + 1e-9)
+                        cos_sim = float(np.clip(np.dot(v_unit, step_unit), -1.0, 1.0))
+                        dir_pen = (1.0 - cos_sim)
+            if slot_state[slot]["area"] is None:
+                area_pen = 0.0
+            else:
+                a0 = slot_state[slot]["area"]; a1 = c["area"]
+                area_pen = abs(a1 - a0) / max(a0, a1, 1.0)
+            return ALPHA_DIST * d + BETA_DIR * dir_pen + GAMMA_AREA * area_pen, d
 
-        # Done: exactly four players labeled (if at least four tracked TIDs are visible).
-        # Everyone else stays "".
+        for s in ["A_1","A_2","B_1","B_2"]:
+            tid = slot_to_tid[s]
+            if tid is not None and tid in present_by_tid:
+                continue  # already assigned this frame
+
+            recently_seen = (tid is not None) and ((f - slot_last_seen[s]) < SWAP_GRACE)
+            pool = [c for c in cand if c["tid"] not in assigned_tids]
+            if not pool:
+                continue
+
+            scored = []
+            for c in pool:
+                # don't steal a TID already bound to a different slot
+                if (c["tid"] in tid_to_slot) and (tid_to_slot[c["tid"]] not in (None, s)):
+                    continue
+                cost, dist_pred = motion_cost(s, c)
+                scored.append((cost, dist_pred, c))
+            if not scored:
+                continue
+
+            scored.sort(key=lambda t: t[0])
+            best_cost, best_dist, best = scored[0]
+
+            if recently_seen and best_dist > MAX_CLAIM_DIST_M:
+                # too far from prediction; keep waiting
+                continue
+
+            # claim
+            slot_to_tid[s] = best["tid"]
+            tid_to_slot[best["tid"]] = s
+            slot_last_seen[s] = f
+            label_slot(best["i"], s)
+            update_slot_state(s, best["xm"], best["ym"], best["area"], dt)
+            assigned_tids.add(best["tid"])
+
+        # 3) everyone else remains "" for this frame
 
     return df
 
@@ -551,6 +596,13 @@ def main():
     for c in needed:
         if c not in df.columns:
             raise ValueError(f"Missing column: {c}")
+
+    # If your model sometimes outputs "playerA_1", etc., normalize to "player"
+    # df["class"] = df["class"].astype(str)
+    # df.loc[df["class"].str.contains(r"^player", case=False, regex=True), "class"] = "player"
+    # df.loc[df["class"].str.contains(r"lead_player", case=False, regex=True), "class"] = "player"
+    # Optional: coerce 'obj' people to 'player'
+    # df.loc[df["class"].str.fullmatch(r"obj", case=False), "class"] = "player"
 
     # basic filtering
     df = df[(df["confidence"] >= MIN_CONF) &
@@ -569,18 +621,18 @@ def main():
         Xs.append(Xm); Ys.append(Ym)
     df["X_m"] = Xs; df["Y_m"] = Ys
 
-    # possession proxies for missing discs near hands
+    # Possession proxies for missing discs near hands
     df = add_possession_proxies(df, H)
 
     # Build tracks
     tracks = build_tracks(df)
 
-    # write back basic track info
+    # write back basic track info & default corrected_class
     df["track_id"]        = -1
     df["corrected_class"] = df["class"]
     df["speed_ms"]        = 0.0
 
-    # fast index to map rows belonging to a track
+    # map rows -> track updates
     idx_map = defaultdict(list)
     for i, r in df.iterrows():
         key = (r["frame"], r["x"], r["y"], r["width"], r["height"], r["confidence"], r["class"])
@@ -594,20 +646,25 @@ def main():
             for ridx in idx_map.get(key, []):
                 df.at[ridx, "track_id"] = t.id
                 df.at[ridx, "speed_ms"] = float(r.get("speed_ms", 0.0))
-                if df.at[ridx, "corrected_class"] != corr:
-                    flips += 1
-                    df.at[ridx, "corrected_class"] = corr
+                # Keep raw for players; discs already set by corr
+                if is_disc(df.at[ridx, "class"]):
+                    if df.at[ridx, "corrected_class"] != corr:
+                        flips += 1
+                        df.at[ridx, "corrected_class"] = corr
+                else:
+                    df.at[ridx, "corrected_class"] = df.at[ridx, "class"]
 
-    # Only one red + one yellow per frame (keep highest conf)
+    # Start with discs set, then enforce at most one per color per frame
+    df.loc[df["class"].isin(["disc_red","disc_yellow"]), "corrected_class"] = df["class"]
     df = enforce_one_red_one_yellow(df)
 
-    # Persistent A/B 1/2 per court (sticky)
+    # Team A/B + 1/2 assignment (persistent, motion-aware)
     df = assign_team_slots_persistent(df)
 
     df.to_csv(OUT_CSV, index=False)
     print(f"✅ Wrote {OUT_CSV}")
     print(f"   Tracks: {len(tracks)}")
-    print(f"   Class corrections applied: {flips}")
+    print(f"   Class corrections adjusted: {flips}")
     print(f"   Using FPS={FPS}, VEL_MAX_MS={VEL_MAX_MS}")
     print("   Columns:", list(df.columns))
 
